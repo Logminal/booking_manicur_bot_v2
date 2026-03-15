@@ -1,0 +1,272 @@
+from __future__ import annotations
+
+from datetime import date, datetime
+
+from aiogram import F, Router
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+
+from app.admin.keyboards import admin_back_keyboard, admin_menu_keyboard, booking_actions_keyboard, bookings_keyboard, cancel_creation_keyboard, contacts_keyboard, schedule_day_keyboard, schedule_menu_keyboard, service_actions_keyboard, services_menu_keyboard, settings_keyboard
+from app.admin.service import DEFAULT_GREETING_TEXT, DEFAULT_MASTER_CONTACT_INSTAGRAM, DEFAULT_MASTER_CONTACT_NAME, DEFAULT_MASTER_CONTACT_PHONE, DEFAULT_MASTER_CONTACT_TELEGRAM, DEFAULT_WORK_END, DEFAULT_WORK_START, cancel_booking_by_admin, confirm_booking, create_service, delete_service_by_id, ensure_core_data, get_booking, get_default_work_hours, get_effective_schedule, get_master_contacts, get_schedule_day, get_service, get_setting_value, list_schedule_days, list_services, list_upcoming_bookings, set_default_work_hours, set_setting_value, toggle_auto_confirm, toggle_service, upsert_schedule_day
+from app.admin.states import ScheduleCreateStates, ServiceCreateStates, SettingsStates
+from app.bot.utils import safe_answer_callback, safe_edit_text
+from app.config import get_settings
+from app.db.session import SessionLocal
+from app.formatters import booking_status_label
+from app.models.enums import SettingKey
+
+router = Router(name="admin")
+
+
+def is_admin(telegram_id: int | None) -> bool:
+    return telegram_id is not None and telegram_id in get_settings().admin_ids
+
+
+def format_service(service) -> str:
+    status = "активна" if service.is_active else "выключена"
+    description = service.description or "Без описания"
+    return f"Услуга: {service.name}\nЦена: {service.price_rub} руб.\nДлительность: {service.duration_minutes} минут\nСтатус: {status}\nОписание: {description}"
+
+
+def format_booking(booking) -> str:
+    client = booking.client
+    client_name = client.first_name or "Без имени"
+    username = f"@{client.username}" if client and client.username else "не указан"
+    service_name = booking.service.name if booking.service else "Услуга"
+    return f"Запись #{booking.id}\nУслуга: {service_name}\nДата: {booking.start_at.strftime('%d.%m.%Y')}\nВремя: {booking.start_at.strftime('%H:%M')} - {booking.end_at.strftime('%H:%M')}\nСтатус: {booking_status_label(booking.status)}\n\nКлиент: {client_name}\nНик: {username}\nTelegram ID: {client.telegram_id if client else '-'}"
+
+
+def format_master_contacts(contacts: dict[str, str]) -> str:
+    return f"Контакты мастера\n\nИмя: {contacts['name']}\nТелефон: {contacts['phone']}\nTelegram: {contacts['telegram']}\nInstagram: {contacts['instagram']}"
+
+
+async def render_admin_menu(message: Message | CallbackQuery) -> None:
+    text = "Админ-панель\n\nВыбери раздел для управления."
+    if isinstance(message, CallbackQuery):
+        await safe_edit_text(message.message, text, reply_markup=admin_menu_keyboard())
+    else:
+        await message.answer(text, reply_markup=admin_menu_keyboard())
+
+
+async def render_services(callback: CallbackQuery) -> None:
+    async with SessionLocal() as session:
+        services = await list_services(session)
+    text = "Услуги\n\nВыбери существующую услугу или добавь новую."
+    if not services:
+        text += "\n\nСписок пока пуст."
+    await safe_edit_text(callback.message, text, reply_markup=services_menu_keyboard(services))
+
+
+async def render_schedule(callback: CallbackQuery) -> None:
+    async with SessionLocal() as session:
+        start_value, end_value = await get_default_work_hours(session)
+        overrides = await list_schedule_days(session)
+    text = f"График\n\nОбщие часы работы: {start_value.strftime('%H:%M')} - {end_value.strftime('%H:%M')}\n\nНиже исключения по датам."
+    if not overrides:
+        text += "\nИсключений пока нет."
+    await safe_edit_text(callback.message, text, reply_markup=schedule_menu_keyboard(overrides))
+
+
+async def render_bookings(callback: CallbackQuery) -> None:
+    async with SessionLocal() as session:
+        bookings = await list_upcoming_bookings(session)
+    text = "Записи\n\nВыбери запись для просмотра и действий." if bookings else "Записей пока нет."
+    await safe_edit_text(callback.message, text, reply_markup=bookings_keyboard(bookings))
+
+
+async def render_contacts(callback: CallbackQuery) -> None:
+    async with SessionLocal() as session:
+        contacts = await get_master_contacts(session)
+    await safe_edit_text(callback.message, format_master_contacts(contacts), reply_markup=contacts_keyboard())
+
+
+async def render_settings(callback: CallbackQuery) -> None:
+    async with SessionLocal() as session:
+        auto_confirm = await get_setting_value(session, SettingKey.AUTO_CONFIRM_BOOKINGS, "true" if get_settings().auto_confirm_bookings else "false")
+        slot_minutes = await get_setting_value(session, SettingKey.SLOT_MINUTES, str(get_settings().slot_minutes))
+        cancel_limit = await get_setting_value(session, SettingKey.CANCEL_LIMIT_MINUTES, str(get_settings().cancel_limit_minutes))
+        greeting = await get_setting_value(session, SettingKey.GREETING_TEXT, DEFAULT_GREETING_TEXT)
+    auto_confirm_enabled = auto_confirm.lower() == "true"
+    auto_confirm_text = "включено" if auto_confirm_enabled else "выключено"
+    text = f"Настройки\n\nАвтоподтверждение: {auto_confirm_text}\nШаг слотов: {slot_minutes} минут\nОтмена записи клиентом: не позже чем за {cancel_limit} минут\n\nПриветствие:\n{greeting}"
+    await safe_edit_text(callback.message, text, reply_markup=settings_keyboard(auto_confirm_enabled))
+
+
+@router.message(Command("admin"))
+async def admin_panel_handler(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id if message.from_user else None):
+        await message.answer("У вас нет доступа к админ-панели.")
+        return
+    await state.clear()
+    async with SessionLocal() as session:
+        await ensure_core_data(session)
+    await render_admin_menu(message)
+
+
+@router.callback_query(F.data == "admin:menu")
+async def admin_menu_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await safe_answer_callback(callback, "Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    await safe_answer_callback(callback)
+    await render_admin_menu(callback)
+
+
+@router.callback_query(F.data == "admin:schedule")
+async def admin_schedule_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await safe_answer_callback(callback, "Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    await safe_answer_callback(callback)
+    await render_schedule(callback)
+
+
+@router.callback_query(F.data == "admin:schedule:defaults")
+async def admin_schedule_defaults_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await safe_answer_callback(callback, "Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(ScheduleCreateStates.waiting_for_default_start)
+    await safe_answer_callback(callback)
+    await safe_edit_text(callback.message, "Введи общее время начала работы в формате ЧЧ:ММ. Например: 09:00", reply_markup=cancel_creation_keyboard("schedule"))
+
+
+@router.message(ScheduleCreateStates.waiting_for_default_start)
+async def schedule_default_start_input(message: Message, state: FSMContext) -> None:
+    raw_time = (message.text or "").strip()
+    try:
+        start_value = datetime.strptime(raw_time, "%H:%M").time()
+    except ValueError:
+        await message.answer("Не смог распознать время. Используй формат ЧЧ:ММ")
+        return
+    await state.update_data(default_start=start_value.strftime("%H:%M"))
+    await state.set_state(ScheduleCreateStates.waiting_for_default_end)
+    await message.answer("Теперь введи общее время окончания работы в формате ЧЧ:ММ. Например: 20:00")
+
+
+@router.message(ScheduleCreateStates.waiting_for_default_end)
+async def schedule_default_end_input(message: Message, state: FSMContext) -> None:
+    raw_time = (message.text or "").strip()
+    try:
+        end_value = datetime.strptime(raw_time, "%H:%M").time()
+    except ValueError:
+        await message.answer("Не смог распознать время. Используй формат ЧЧ:ММ")
+        return
+    payload = await state.get_data()
+    start_value = datetime.strptime(payload["default_start"], "%H:%M").time()
+    if end_value <= start_value:
+        await message.answer("Время окончания должно быть позже времени начала.")
+        return
+    async with SessionLocal() as session:
+        await set_default_work_hours(session, start_value, end_value)
+    await state.clear()
+    await message.answer(f"Общие часы работы обновлены: {start_value.strftime('%H:%M')} - {end_value.strftime('%H:%M')}")
+
+
+@router.callback_query(F.data == "admin:schedule:add")
+@router.callback_query(F.data.startswith("admin:schedule:edit:"))
+async def admin_schedule_add_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await safe_answer_callback(callback, "Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(ScheduleCreateStates.waiting_for_date)
+    await safe_answer_callback(callback)
+    await safe_edit_text(callback.message, "Введи дату исключения в формате ДД.ММ.ГГГГ. Например: 20.03.2026", reply_markup=cancel_creation_keyboard("schedule"))
+
+
+@router.message(ScheduleCreateStates.waiting_for_date)
+async def schedule_date_input(message: Message, state: FSMContext) -> None:
+    raw_date = (message.text or "").strip()
+    try:
+        target_date = datetime.strptime(raw_date, "%d.%m.%Y").date()
+    except ValueError:
+        await message.answer("Не смог распознать дату. Используй формат ДД.ММ.ГГГГ")
+        return
+    await state.update_data(schedule_date=target_date.isoformat())
+    await state.set_state(ScheduleCreateStates.waiting_for_mode)
+    await message.answer("Напиши 'рабочий' если в этот день особое рабочее время, или 'выходной' если мастер не работает.", reply_markup=cancel_creation_keyboard("schedule"))
+
+
+@router.message(ScheduleCreateStates.waiting_for_mode)
+async def schedule_mode_input(message: Message, state: FSMContext) -> None:
+    mode = (message.text or "").strip().lower()
+    if mode not in {"рабочий", "выходной"}:
+        await message.answer("Напиши только 'рабочий' или 'выходной'.")
+        return
+    is_working_day = mode == "рабочий"
+    await state.update_data(is_working_day=is_working_day)
+    if not is_working_day:
+        payload = await state.get_data()
+        async with SessionLocal() as session:
+            day = await upsert_schedule_day(session, target_date=date.fromisoformat(payload["schedule_date"]), is_working_day=False, start_time=None, end_time=None, note="Выходной")
+        await state.clear()
+        await message.answer(f"Для {day.work_date.strftime('%d.%m.%Y')} сохранен выходной день.")
+        return
+    await state.set_state(ScheduleCreateStates.waiting_for_start_time)
+    await message.answer("Введи время начала работы для этой даты в формате ЧЧ:ММ")
+
+
+@router.message(ScheduleCreateStates.waiting_for_start_time)
+async def schedule_start_input(message: Message, state: FSMContext) -> None:
+    raw_time = (message.text or "").strip()
+    try:
+        start_value = datetime.strptime(raw_time, "%H:%M").time()
+    except ValueError:
+        await message.answer("Не смог распознать время. Используй формат ЧЧ:ММ")
+        return
+    await state.update_data(start_time=start_value.strftime("%H:%M"))
+    await state.set_state(ScheduleCreateStates.waiting_for_end_time)
+    await message.answer("Теперь введи время окончания работы для этой даты в формате ЧЧ:ММ")
+
+
+@router.message(ScheduleCreateStates.waiting_for_end_time)
+async def schedule_end_input(message: Message, state: FSMContext) -> None:
+    raw_time = (message.text or "").strip()
+    try:
+        end_value = datetime.strptime(raw_time, "%H:%M").time()
+    except ValueError:
+        await message.answer("Не смог распознать время. Используй формат ЧЧ:ММ")
+        return
+    payload = await state.get_data()
+    start_value = datetime.strptime(payload["start_time"], "%H:%M").time()
+    if end_value <= start_value:
+        await message.answer("Время окончания должно быть позже времени начала.")
+        return
+    await state.update_data(end_time=end_value.strftime("%H:%M"))
+    await state.set_state(ScheduleCreateStates.waiting_for_note)
+    await message.answer("Добавь заметку к исключению или отправь '-' если не нужно.")
+
+
+@router.message(ScheduleCreateStates.waiting_for_note)
+async def schedule_note_input(message: Message, state: FSMContext) -> None:
+    note = (message.text or "").strip()
+    payload = await state.get_data()
+    async with SessionLocal() as session:
+        day = await upsert_schedule_day(session, target_date=date.fromisoformat(payload["schedule_date"]), is_working_day=True, start_time=datetime.strptime(payload["start_time"], "%H:%M").time(), end_time=datetime.strptime(payload["end_time"], "%H:%M").time(), note=None if note == "-" else note)
+    await state.clear()
+    await message.answer(f"Исключение сохранено: {day.work_date.strftime('%d.%m.%Y')}\nВремя: {day.start_time.strftime('%H:%M')} - {day.end_time.strftime('%H:%M')}")
+
+
+@router.callback_query(F.data.startswith("admin:schedule:view:"))
+async def admin_schedule_view_callback(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await safe_answer_callback(callback, "Нет доступа", show_alert=True)
+        return
+    target_date = date.fromisoformat(callback.data.rsplit(":", 1)[-1])
+    async with SessionLocal() as session:
+        is_working, start_value, end_value, note = await get_effective_schedule(session, target_date)
+        override = await get_schedule_day(session, target_date)
+    await safe_answer_callback(callback)
+    if override is None:
+        await safe_edit_text(callback.message, "Для этой даты нет отдельного исключения. Используются общие часы работы.", reply_markup=admin_back_keyboard())
+        return
+    if is_working:
+        text = f"Дата: {target_date.strftime('%d.%m.%Y')}\nИсключение: рабочий день\nВремя: {start_value.strftime('%H:%M')} - {end_value.strftime('%H:%M')}\nЗаметка: {note or 'нет'}"
+    else:
+        text = f"Дата: {target_date.strftime('%d.%m.%Y')}\nИсключение: выходной"
+    await safe_edit_text(callback.message, text, reply_markup=schedule_day_keyboard(target_date))
