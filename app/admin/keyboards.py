@@ -6,6 +6,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.formatters import booking_status_label
 from app.models.booking import Booking
+from app.models.master import Master
 from app.models.schedule import BlockedPeriod, ScheduleDay
 from app.models.service import Service
 
@@ -15,6 +16,7 @@ DATE_PICKER_DAYS = 21
 
 def admin_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Мастера", callback_data="admin:masters")],
         [InlineKeyboardButton(text="Услуги", callback_data="admin:services")],
         [InlineKeyboardButton(text="График", callback_data="admin:schedule")],
         [InlineKeyboardButton(text="Записи", callback_data="admin:bookings")],
@@ -26,6 +28,25 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
 
 def admin_back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Назад", callback_data="admin:menu")]])
+
+
+def masters_menu_keyboard(masters: list[Master]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="Добавить мастера", callback_data="admin:master:add")]]
+    for master in masters:
+        status = "ON" if master.is_active else "OFF"
+        rows.append([InlineKeyboardButton(text=f"{master.name} [{status}]", callback_data=f"admin:master:view:{master.id}")])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="admin:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def master_actions_keyboard(master_id: int, is_active: bool) -> InlineKeyboardMarkup:
+    toggle_text = "?????????" if is_active else "????????"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="?????????????", callback_data=f"admin:master:edit:{master_id}")],
+        [InlineKeyboardButton(text=toggle_text, callback_data=f"admin:master:toggle:{master_id}")],
+        [InlineKeyboardButton(text="???????", callback_data=f"admin:master:delete:{master_id}")],
+        [InlineKeyboardButton(text="? ?????? ????????", callback_data="admin:masters")],
+    ])
 
 
 def services_menu_keyboard(services: list[Service]) -> InlineKeyboardMarkup:
@@ -59,43 +80,52 @@ def settings_keyboard(auto_confirm_enabled: bool) -> InlineKeyboardMarkup:
     ])
 
 
-def schedule_menu_keyboard() -> InlineKeyboardMarkup:
+def schedule_master_keyboard(masters: list[Master]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for master in masters:
+        rows.append([InlineKeyboardButton(text=master.name, callback_data=f"admin:schedule:master:{master.id}")])
+    rows.append([InlineKeyboardButton(text="Общие часы работы", callback_data="admin:schedule:defaults")])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="admin:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def schedule_menu_keyboard(master_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Общие часы работы", callback_data="admin:schedule:defaults")],
-        [InlineKeyboardButton(text="Исключения по датам", callback_data="admin:schedule:overrides")],
-        [InlineKeyboardButton(text="Ручные блокировки", callback_data="admin:schedule:blocks")],
+        [InlineKeyboardButton(text="Исключения по датам", callback_data=f"admin:schedule:overrides:{master_id}")],
+        [InlineKeyboardButton(text="Ручные блокировки", callback_data=f"admin:schedule:blocks:{master_id}")],
+        [InlineKeyboardButton(text="Выбрать другого мастера", callback_data="admin:schedule")],
         [InlineKeyboardButton(text="Назад", callback_data="admin:menu")],
     ])
 
 
-def schedule_overrides_keyboard(overrides: list[ScheduleDay]) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text="Добавить исключение", callback_data="admin:schedule:override:add")]]
+def schedule_overrides_keyboard(master_id: int, overrides: list[ScheduleDay]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="Добавить исключение", callback_data=f"admin:schedule:override:add:{master_id}")]]
     for day in overrides:
         label = day.work_date.strftime("%d.%m.%Y")
         if not day.is_working_day:
             label = f"{label} • выходной"
         elif day.start_time and day.end_time:
             label = f"{label} • {day.start_time.strftime('%H:%M')}-{day.end_time.strftime('%H:%M')}"
-        rows.append([InlineKeyboardButton(text=label, callback_data=f"admin:schedule:view:{day.work_date.isoformat()}")])
-    rows.append([InlineKeyboardButton(text="К графику", callback_data="admin:schedule")])
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"admin:schedule:view:{master_id}:{day.work_date.isoformat()}")])
+    rows.append([InlineKeyboardButton(text="К мастеру", callback_data=f"admin:schedule:master:{master_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def schedule_day_keyboard(target_date: date) -> InlineKeyboardMarkup:
+def schedule_day_keyboard(master_id: int, target_date: date) -> InlineKeyboardMarkup:
     iso_date = target_date.isoformat()
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Изменить", callback_data=f"admin:schedule:override:date:{iso_date}")],
-        [InlineKeyboardButton(text="Удалить исключение", callback_data=f"admin:schedule:delete:{iso_date}")],
-        [InlineKeyboardButton(text="К исключениям", callback_data="admin:schedule:overrides")],
+        [InlineKeyboardButton(text="Изменить", callback_data=f"admin:schedule:override:date:{master_id}:{iso_date}")],
+        [InlineKeyboardButton(text="Удалить исключение", callback_data=f"admin:schedule:delete:{master_id}:{iso_date}")],
+        [InlineKeyboardButton(text="К исключениям", callback_data=f"admin:schedule:overrides:{master_id}")],
     ])
 
 
-def schedule_mode_keyboard(target_date: date) -> InlineKeyboardMarkup:
+def schedule_mode_keyboard(master_id: int, target_date: date) -> InlineKeyboardMarkup:
     iso_date = target_date.isoformat()
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Выходной", callback_data=f"admin:schedule:mode:off:{iso_date}")],
-        [InlineKeyboardButton(text="Особые часы", callback_data=f"admin:schedule:mode:work:{iso_date}")],
-        [InlineKeyboardButton(text="Назад", callback_data="admin:schedule:overrides")],
+        [InlineKeyboardButton(text="Выходной", callback_data=f"admin:schedule:mode:off:{master_id}:{iso_date}")],
+        [InlineKeyboardButton(text="Особые часы", callback_data=f"admin:schedule:mode:work:{master_id}:{iso_date}")],
+        [InlineKeyboardButton(text="Назад", callback_data=f"admin:schedule:overrides:{master_id}")],
     ])
 
 
@@ -121,19 +151,19 @@ def date_picker_keyboard(prefix: str, *, back_callback: str) -> InlineKeyboardMa
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def blocked_periods_keyboard(blocked_periods: list[BlockedPeriod]) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text="Добавить блокировку", callback_data="admin:schedule:block:add")]]
+def blocked_periods_keyboard(master_id: int, blocked_periods: list[BlockedPeriod]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="Добавить блокировку", callback_data=f"admin:schedule:block:add:{master_id}")]]
     for blocked_period in blocked_periods:
         label = f"{blocked_period.start_at.strftime('%d.%m %H:%M')} - {blocked_period.end_at.strftime('%H:%M')}"
-        rows.append([InlineKeyboardButton(text=label, callback_data=f"admin:schedule:block:view:{blocked_period.id}")])
-    rows.append([InlineKeyboardButton(text="К графику", callback_data="admin:schedule")])
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"admin:schedule:block:view:{master_id}:{blocked_period.id}")])
+    rows.append([InlineKeyboardButton(text="К мастеру", callback_data=f"admin:schedule:master:{master_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def blocked_period_keyboard(blocked_period_id: int) -> InlineKeyboardMarkup:
+def blocked_period_keyboard(master_id: int, blocked_period_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Удалить блокировку", callback_data=f"admin:schedule:block:delete:{blocked_period_id}")],
-        [InlineKeyboardButton(text="К блокировкам", callback_data="admin:schedule:blocks")],
+        [InlineKeyboardButton(text="Удалить блокировку", callback_data=f"admin:schedule:block:delete:{master_id}:{blocked_period_id}")],
+        [InlineKeyboardButton(text="К блокировкам", callback_data=f"admin:schedule:blocks:{master_id}")],
     ])
 
 

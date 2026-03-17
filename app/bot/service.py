@@ -6,11 +6,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.admin.service import DEFAULT_GREETING_TEXT, DEFAULT_MASTER_CONTACT_INSTAGRAM, DEFAULT_MASTER_CONTACT_NAME, DEFAULT_MASTER_CONTACT_PHONE, DEFAULT_MASTER_CONTACT_TELEGRAM, get_default_master, get_effective_schedule, get_setting_value
+from app.admin.service import DEFAULT_GREETING_TEXT, DEFAULT_MASTER_CONTACT_INSTAGRAM, DEFAULT_MASTER_CONTACT_NAME, DEFAULT_MASTER_CONTACT_PHONE, DEFAULT_MASTER_CONTACT_TELEGRAM, get_default_master, get_effective_schedule, get_master, get_setting_value, list_active_masters
 from app.config import get_settings
 from app.models.booking import Booking
 from app.models.client import Client
 from app.models.enums import BookingStatus, SettingKey
+from app.models.master import Master
 from app.models.schedule import BlockedPeriod
 from app.models.service import Service
 from app.services.booking_slots import SlotCalculationInput, SlotCalculator, TimeRange, build_busy_ranges
@@ -61,15 +62,24 @@ async def get_service(session: AsyncSession, service_id: int) -> Service | None:
     return result.scalar_one_or_none()
 
 
-async def list_available_dates_for_service(session: AsyncSession, service_id: int, *, days_limit: int = 14, scan_horizon_days: int = 60) -> list[date]:
+async def get_booking_master(session: AsyncSession, master_id: int) -> Master | None:
+    return await get_master(session, master_id)
+
+
+async def list_booking_masters(session: AsyncSession) -> list[Master]:
+    return await list_active_masters(session)
+
+
+async def list_available_dates_for_service(session: AsyncSession, service_id: int, master_id: int, *, days_limit: int = 14, scan_horizon_days: int = 60) -> list[date]:
     service = await get_service(session, service_id)
-    if service is None or not service.is_active:
+    master = await get_master(session, master_id)
+    if service is None or not service.is_active or master is None or not master.is_active:
         return []
     available_dates: list[date] = []
     today = datetime.now().date()
     for offset in range(scan_horizon_days):
         target_date = today + timedelta(days=offset)
-        slots = await list_available_slots_for_service(session, service_id, target_date)
+        slots = await list_available_slots_for_service(session, service_id, master_id, target_date)
         if slots:
             available_dates.append(target_date)
         if len(available_dates) >= days_limit:
@@ -77,12 +87,12 @@ async def list_available_dates_for_service(session: AsyncSession, service_id: in
     return available_dates
 
 
-async def list_available_slots_for_service(session: AsyncSession, service_id: int, target_date: date) -> list[datetime]:
+async def list_available_slots_for_service(session: AsyncSession, service_id: int, master_id: int, target_date: date) -> list[datetime]:
     service = await get_service(session, service_id)
-    if service is None or not service.is_active:
+    master = await get_master(session, master_id)
+    if service is None or not service.is_active or master is None or not master.is_active:
         return []
-    master = await get_default_master(session)
-    is_working_day, start_time, end_time, _ = await get_effective_schedule(session, target_date)
+    is_working_day, start_time, end_time, _ = await get_effective_schedule(session, target_date, master_id=master.id)
     if not is_working_day or start_time is None or end_time is None:
         return []
     day_start = datetime.combine(target_date, start_time)
@@ -99,17 +109,18 @@ async def list_available_slots_for_service(session: AsyncSession, service_id: in
     return [slot for slot in slots if slot > now]
 
 
-async def create_booking(session: AsyncSession, *, telegram_id: int, username: str | None, first_name: str | None, last_name: str | None, service_id: int, start_at: datetime) -> Booking | None:
+async def create_booking(session: AsyncSession, *, telegram_id: int, username: str | None, first_name: str | None, last_name: str | None, service_id: int, master_id: int, start_at: datetime) -> Booking | None:
     client = await get_or_create_client(session, telegram_id=telegram_id, username=username, first_name=first_name, last_name=last_name)
     service = await get_service(session, service_id)
-    if service is None or not service.is_active:
+    master = await get_master(session, master_id)
+    if service is None or not service.is_active or master is None or not master.is_active:
         return None
-    available_slots = await list_available_slots_for_service(session, service_id, start_at.date())
+    available_slots = await list_available_slots_for_service(session, service_id, master_id, start_at.date())
     if start_at not in available_slots:
         return None
     auto_confirm = await get_setting_value(session, SettingKey.AUTO_CONFIRM_BOOKINGS, "true" if get_settings().auto_confirm_bookings else "false")
     status = BookingStatus.CONFIRMED if auto_confirm.lower() == "true" else BookingStatus.PENDING
-    booking = Booking(client_id=client.id, service_id=service.id, master_id=service.master_id or (await get_default_master(session)).id, start_at=start_at, end_at=start_at + timedelta(minutes=service.duration_minutes), status=status)
+    booking = Booking(client_id=client.id, service_id=service.id, master_id=master.id, start_at=start_at, end_at=start_at + timedelta(minutes=service.duration_minutes), status=status)
     session.add(booking)
     await session.commit()
     await session.refresh(booking)
@@ -117,12 +128,12 @@ async def create_booking(session: AsyncSession, *, telegram_id: int, username: s
 
 
 async def list_client_bookings(session: AsyncSession, telegram_id: int) -> list[Booking]:
-    result = await session.execute(select(Booking).join(Client, Client.id == Booking.client_id).options(selectinload(Booking.service), selectinload(Booking.client)).where(Client.telegram_id == telegram_id, Booking.status.in_([BookingStatus.PENDING, BookingStatus.CONFIRMED])).order_by(Booking.start_at.asc()))
+    result = await session.execute(select(Booking).join(Client, Client.id == Booking.client_id).options(selectinload(Booking.service), selectinload(Booking.client), selectinload(Booking.master)).where(Client.telegram_id == telegram_id, Booking.status.in_([BookingStatus.PENDING, BookingStatus.CONFIRMED])).order_by(Booking.start_at.asc()))
     return list(result.scalars().all())
 
 
 async def get_client_booking(session: AsyncSession, telegram_id: int, booking_id: int) -> Booking | None:
-    result = await session.execute(select(Booking).join(Client, Client.id == Booking.client_id).options(selectinload(Booking.service), selectinload(Booking.client)).where(Client.telegram_id == telegram_id, Booking.id == booking_id))
+    result = await session.execute(select(Booking).join(Client, Client.id == Booking.client_id).options(selectinload(Booking.service), selectinload(Booking.client), selectinload(Booking.master)).where(Client.telegram_id == telegram_id, Booking.id == booking_id))
     return result.scalar_one_or_none()
 
 

@@ -24,7 +24,15 @@ def services_keyboard(services: list[tuple[int, str, int, int]]) -> InlineKeyboa
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def dates_keyboard(service_id: int, dates: list[date]) -> InlineKeyboardMarkup:
+def masters_keyboard(service_id: int, masters: list[tuple[int, str]]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for master_id, name in masters:
+        rows.append([InlineKeyboardButton(text=name, callback_data=f"book:master:{service_id}:{master_id}")])
+    rows.append([InlineKeyboardButton(text="К услугам", callback_data="menu:book")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def dates_keyboard(service_id: int, master_id: int, dates: list[date]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for index in range(0, len(dates), 3):
         row: list[InlineKeyboardButton] = []
@@ -37,25 +45,25 @@ def dates_keyboard(service_id: int, dates: list[date]) -> InlineKeyboardMarkup:
                 label = f"Завтра\n{label}"
             elif delta == 2:
                 label = f"Послезавтра\n{label}"
-            row.append(InlineKeyboardButton(text=label, callback_data=f"book:date:{service_id}:{target_date.isoformat()}"))
+            row.append(InlineKeyboardButton(text=label, callback_data=f"book:date:{service_id}:{master_id}:{target_date.isoformat()}"))
         rows.append(row)
-    rows.append([InlineKeyboardButton(text="К услугам", callback_data="menu:book")])
+    rows.append([InlineKeyboardButton(text="К мастерам", callback_data=f"book:service:{service_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def slots_keyboard(service_id: int, target_date: date, slots: list[datetime]) -> InlineKeyboardMarkup:
+def slots_keyboard(service_id: int, master_id: int, target_date: date, slots: list[datetime]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for index in range(0, len(slots), 3):
-        row = [InlineKeyboardButton(text=slot.strftime("%H:%M"), callback_data=f"book:slot:{service_id}:{target_date.isoformat()}:{slot.strftime('%H-%M')}") for slot in slots[index:index + 3]]
+        row = [InlineKeyboardButton(text=slot.strftime("%H:%M"), callback_data=f"book:slot:{service_id}:{master_id}:{target_date.isoformat()}:{slot.strftime('%H-%M')}") for slot in slots[index:index + 3]]
         rows.append(row)
-    rows.append([InlineKeyboardButton(text="К датам", callback_data=f"book:service:{service_id}")])
+    rows.append([InlineKeyboardButton(text="К датам", callback_data=f"book:master:{service_id}:{master_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def booking_confirm_keyboard(service_id: int, target_date: date, slot: datetime) -> InlineKeyboardMarkup:
+def booking_confirm_keyboard(service_id: int, master_id: int, target_date: date, slot: datetime) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Подтвердить запись", callback_data=f"book:confirm:{service_id}:{target_date.isoformat()}:{slot.strftime('%H-%M')}")],
-        [InlineKeyboardButton(text="К слотам", callback_data=f"book:date:{service_id}:{target_date.isoformat()}")],
+        [InlineKeyboardButton(text="Подтвердить запись", callback_data=f"book:confirm:{service_id}:{master_id}:{target_date.isoformat()}:{slot.strftime('%H-%M')}")],
+        [InlineKeyboardButton(text="К слотам", callback_data=f"book:date:{service_id}:{master_id}:{target_date.isoformat()}")],
     ])
 
 

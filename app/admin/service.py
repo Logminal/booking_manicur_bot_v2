@@ -2,7 +2,7 @@
 
 from datetime import date, datetime, time, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -53,6 +53,67 @@ async def get_default_master(session: AsyncSession) -> Master:
     return master
 
 
+async def list_masters(session: AsyncSession) -> list[Master]:
+    result = await session.execute(select(Master).order_by(Master.is_active.desc(), Master.name.asc()))
+    return list(result.scalars().all())
+
+
+async def list_active_masters(session: AsyncSession) -> list[Master]:
+    result = await session.execute(select(Master).where(Master.is_active.is_(True)).order_by(Master.name.asc()))
+    return list(result.scalars().all())
+
+
+async def get_master(session: AsyncSession, master_id: int) -> Master | None:
+    result = await session.execute(select(Master).where(Master.id == master_id))
+    return result.scalar_one_or_none()
+
+
+async def create_master(session: AsyncSession, name: str) -> Master:
+    master = Master(name=name, is_active=True)
+    session.add(master)
+    await session.commit()
+    await session.refresh(master)
+    return master
+
+
+async def toggle_master(session: AsyncSession, master_id: int) -> Master | None:
+    master = await get_master(session, master_id)
+    if master is None:
+        return None
+    master.is_active = not master.is_active
+    await session.commit()
+    await session.refresh(master)
+    return master
+
+
+async def rename_master(session: AsyncSession, master_id: int, name: str) -> Master | None:
+    master = await get_master(session, master_id)
+    if master is None:
+        return None
+    master.name = name
+    await session.commit()
+    await session.refresh(master)
+    return master
+
+
+async def delete_master(session: AsyncSession, master_id: int) -> tuple[bool, str]:
+    master = await get_master(session, master_id)
+    if master is None:
+        return False, "not_found"
+    total_masters = await session.scalar(select(func.count(Master.id)))
+    if (total_masters or 0) <= 1:
+        return False, "last_master"
+    has_services = await session.scalar(select(Service.id).where(Service.master_id == master_id).limit(1))
+    has_bookings = await session.scalar(select(Booking.id).where(Booking.master_id == master_id).limit(1))
+    has_schedule = await session.scalar(select(ScheduleDay.id).where(ScheduleDay.master_id == master_id).limit(1))
+    has_blocks = await session.scalar(select(BlockedPeriod.id).where(BlockedPeriod.master_id == master_id).limit(1))
+    if any(value is not None for value in (has_services, has_bookings, has_schedule, has_blocks)):
+        return False, "has_related"
+    await session.delete(master)
+    await session.commit()
+    return True, "deleted"
+
+
 async def ensure_setting(session: AsyncSession, key: SettingKey, default_value: str) -> AppSetting:
     result = await session.execute(select(AppSetting).where(AppSetting.key == key))
     setting = result.scalar_one_or_none()
@@ -97,14 +158,16 @@ async def set_default_work_hours(session: AsyncSession, start_value: time, end_v
     await set_setting_value(session, SettingKey.DEFAULT_WORK_END, end_value.strftime("%H:%M"), DEFAULT_WORK_END)
 
 
-async def get_schedule_override(session: AsyncSession, target_date: date) -> ScheduleDay | None:
-    master = await get_default_master(session)
+async def get_schedule_override(session: AsyncSession, target_date: date, master_id: int | None = None) -> ScheduleDay | None:
+    master = await get_master(session, master_id) if master_id is not None else await get_default_master(session)
+    if master is None:
+        return None
     result = await session.execute(select(ScheduleDay).where(ScheduleDay.master_id == master.id, ScheduleDay.work_date == target_date))
     return result.scalar_one_or_none()
 
 
-async def get_effective_schedule(session: AsyncSession, target_date: date) -> tuple[bool, time | None, time | None, str | None]:
-    override = await get_schedule_override(session, target_date)
+async def get_effective_schedule(session: AsyncSession, target_date: date, master_id: int | None = None) -> tuple[bool, time | None, time | None, str | None]:
+    override = await get_schedule_override(session, target_date, master_id=master_id)
     if override is not None:
         if not override.is_working_day:
             return False, None, None, override.note
@@ -175,8 +238,10 @@ async def delete_service_by_id(session: AsyncSession, service_id: int) -> bool:
     return True
 
 
-async def upsert_schedule_day(session: AsyncSession, *, target_date: date, is_working_day: bool, start_time: time | None, end_time: time | None, note: str | None) -> ScheduleDay:
-    master = await get_default_master(session)
+async def upsert_schedule_day(session: AsyncSession, *, target_date: date, is_working_day: bool, start_time: time | None, end_time: time | None, note: str | None, master_id: int | None = None) -> ScheduleDay:
+    master = await get_master(session, master_id) if master_id is not None else await get_default_master(session)
+    if master is None:
+        raise ValueError("Master not found")
     result = await session.execute(select(ScheduleDay).where(ScheduleDay.master_id == master.id, ScheduleDay.work_date == target_date))
     day = result.scalar_one_or_none()
     if day is None:
@@ -191,8 +256,8 @@ async def upsert_schedule_day(session: AsyncSession, *, target_date: date, is_wo
     return day
 
 
-async def delete_schedule_override(session: AsyncSession, target_date: date) -> bool:
-    day = await get_schedule_override(session, target_date)
+async def delete_schedule_override(session: AsyncSession, target_date: date, master_id: int | None = None) -> bool:
+    day = await get_schedule_override(session, target_date, master_id=master_id)
     if day is None:
         return False
     await session.delete(day)
@@ -200,19 +265,23 @@ async def delete_schedule_override(session: AsyncSession, target_date: date) -> 
     return True
 
 
-async def list_schedule_days(session: AsyncSession, limit: int = 30) -> list[ScheduleDay]:
-    master = await get_default_master(session)
+async def list_schedule_days(session: AsyncSession, limit: int = 30, master_id: int | None = None) -> list[ScheduleDay]:
+    master = await get_master(session, master_id) if master_id is not None else await get_default_master(session)
+    if master is None:
+        return []
     today = datetime.now().date()
     result = await session.execute(select(ScheduleDay).where(ScheduleDay.master_id == master.id, ScheduleDay.work_date >= today).order_by(ScheduleDay.work_date.asc()).limit(limit))
     return list(result.scalars().all())
 
 
-async def get_schedule_day(session: AsyncSession, target_date: date) -> ScheduleDay | None:
-    return await get_schedule_override(session, target_date)
+async def get_schedule_day(session: AsyncSession, target_date: date, master_id: int | None = None) -> ScheduleDay | None:
+    return await get_schedule_override(session, target_date, master_id=master_id)
 
 
-async def create_blocked_period(session: AsyncSession, *, target_date: date, start_time: time, end_time: time, reason: str | None) -> BlockedPeriod:
-    master = await get_default_master(session)
+async def create_blocked_period(session: AsyncSession, *, target_date: date, start_time: time, end_time: time, reason: str | None, master_id: int | None = None) -> BlockedPeriod:
+    master = await get_master(session, master_id) if master_id is not None else await get_default_master(session)
+    if master is None:
+        raise ValueError("Master not found")
     blocked_period = BlockedPeriod(master_id=master.id, start_at=datetime.combine(target_date, start_time), end_at=datetime.combine(target_date, end_time), reason=reason or None)
     session.add(blocked_period)
     await session.commit()
@@ -220,8 +289,10 @@ async def create_blocked_period(session: AsyncSession, *, target_date: date, sta
     return blocked_period
 
 
-async def list_blocked_periods(session: AsyncSession, limit: int = 20) -> list[BlockedPeriod]:
-    master = await get_default_master(session)
+async def list_blocked_periods(session: AsyncSession, limit: int = 20, master_id: int | None = None) -> list[BlockedPeriod]:
+    master = await get_master(session, master_id) if master_id is not None else await get_default_master(session)
+    if master is None:
+        return []
     now = datetime.now()
     result = await session.execute(select(BlockedPeriod).where(BlockedPeriod.master_id == master.id, BlockedPeriod.end_at >= now).order_by(BlockedPeriod.start_at.asc()).limit(limit))
     return list(result.scalars().all())
@@ -243,24 +314,19 @@ async def delete_blocked_period(session: AsyncSession, blocked_period_id: int) -
 
 async def list_upcoming_bookings(session: AsyncSession, limit: int = 10) -> list[Booking]:
     now = datetime.now()
-    result = await session.execute(select(Booking).options(selectinload(Booking.client), selectinload(Booking.service)).where(Booking.start_at >= now).order_by(Booking.start_at.asc()).limit(limit))
+    result = await session.execute(select(Booking).options(selectinload(Booking.client), selectinload(Booking.service), selectinload(Booking.master)).where(Booking.start_at >= now).order_by(Booking.start_at.asc()).limit(limit))
     return list(result.scalars().all())
 
 
 async def list_bookings_for_date(session: AsyncSession, target_date: date) -> list[Booking]:
     start_of_day = datetime.combine(target_date, time.min)
     end_of_day = datetime.combine(target_date, time.max)
-    result = await session.execute(
-        select(Booking)
-        .options(selectinload(Booking.client), selectinload(Booking.service))
-        .where(Booking.start_at >= start_of_day, Booking.start_at <= end_of_day)
-        .order_by(Booking.start_at.asc())
-    )
+    result = await session.execute(select(Booking).options(selectinload(Booking.client), selectinload(Booking.service), selectinload(Booking.master)).where(Booking.start_at >= start_of_day, Booking.start_at <= end_of_day).order_by(Booking.start_at.asc()))
     return list(result.scalars().all())
 
 
 async def get_booking(session: AsyncSession, booking_id: int) -> Booking | None:
-    result = await session.execute(select(Booking).options(selectinload(Booking.client), selectinload(Booking.service)).where(Booking.id == booking_id))
+    result = await session.execute(select(Booking).options(selectinload(Booking.client), selectinload(Booking.service), selectinload(Booking.master)).where(Booking.id == booking_id))
     return result.scalar_one_or_none()
 
 
@@ -309,39 +375,18 @@ async def list_available_reschedule_slots(session: AsyncSession, booking_id: int
     booking = await get_booking(session, booking_id)
     if booking is None or booking.service is None:
         return []
-    service = booking.service
-    master = await get_default_master(session)
-    is_working_day, start_time, end_time, _ = await get_effective_schedule(session, target_date)
+    master = booking.master or await get_default_master(session)
+    is_working_day, start_time, end_time, _ = await get_effective_schedule(session, target_date, master_id=master.id)
     if not is_working_day or start_time is None or end_time is None:
         return []
     day_start = datetime.combine(target_date, start_time)
     day_end = datetime.combine(target_date, end_time)
-    bookings_result = await session.execute(
-        select(Booking.start_at, Booking.end_at, Booking.status)
-        .where(
-            Booking.master_id == master.id,
-            Booking.id != booking_id,
-            Booking.start_at < day_end,
-            Booking.end_at > day_start,
-        )
-    )
+    bookings_result = await session.execute(select(Booking.start_at, Booking.end_at, Booking.status).where(Booking.master_id == master.id, Booking.id != booking_id, Booking.start_at < day_end, Booking.end_at > day_start))
     bookings = list(bookings_result.all())
-    blocked_result = await session.execute(
-        select(BlockedPeriod).where(BlockedPeriod.master_id == master.id, BlockedPeriod.start_at < day_end, BlockedPeriod.end_at > day_start)
-    )
+    blocked_result = await session.execute(select(BlockedPeriod).where(BlockedPeriod.master_id == master.id, BlockedPeriod.start_at < day_end, BlockedPeriod.end_at > day_start))
     blocked_ranges = [TimeRange(start_at=period.start_at, end_at=period.end_at) for period in blocked_result.scalars().all()]
     slot_minutes = int(await get_setting_value(session, SettingKey.SLOT_MINUTES, str(get_settings().slot_minutes)))
-    slots = SlotCalculator(
-        SlotCalculationInput(
-            target_date=target_date,
-            day_start=start_time,
-            day_end=end_time,
-            slot_minutes=slot_minutes,
-            service_duration_minutes=service.duration_minutes,
-            busy_ranges=build_busy_ranges(bookings),
-            blocked_ranges=blocked_ranges,
-        )
-    ).build_available_slots()
+    slots = SlotCalculator(SlotCalculationInput(target_date=target_date, day_start=start_time, day_end=end_time, slot_minutes=slot_minutes, service_duration_minutes=booking.service.duration_minutes, busy_ranges=build_busy_ranges(bookings), blocked_ranges=blocked_ranges)).build_available_slots()
     if target_date != datetime.now().date():
         return slots
     now = datetime.now()

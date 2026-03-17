@@ -17,6 +17,14 @@ class ServiceEditStates(StatesGroup):
     waiting_for_description = State()
 
 
+class MasterCreateStates(StatesGroup):
+    waiting_for_name = State()
+
+
+class MasterEditStates(StatesGroup):
+    waiting_for_name = State()
+
+
 class ScheduleCreateStates(StatesGroup):
     waiting_for_date = State()
     waiting_for_mode = State()
