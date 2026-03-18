@@ -40,12 +40,12 @@ def masters_menu_keyboard(masters: list[Master]) -> InlineKeyboardMarkup:
 
 
 def master_actions_keyboard(master_id: int, is_active: bool) -> InlineKeyboardMarkup:
-    toggle_text = "?????????" if is_active else "????????"
+    toggle_text = "Выключить" if is_active else "Включить"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="?????????????", callback_data=f"admin:master:edit:{master_id}")],
+        [InlineKeyboardButton(text="Переименовать", callback_data=f"admin:master:edit:{master_id}")],
         [InlineKeyboardButton(text=toggle_text, callback_data=f"admin:master:toggle:{master_id}")],
-        [InlineKeyboardButton(text="???????", callback_data=f"admin:master:delete:{master_id}")],
-        [InlineKeyboardButton(text="? ?????? ????????", callback_data="admin:masters")],
+        [InlineKeyboardButton(text="Удалить", callback_data=f"admin:master:delete:{master_id}")],
+        [InlineKeyboardButton(text="К списку мастеров", callback_data="admin:masters")],
     ])
 
 

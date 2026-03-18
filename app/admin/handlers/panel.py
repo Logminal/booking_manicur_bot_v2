@@ -284,7 +284,7 @@ async def admin_master_edit_callback(callback: CallbackQuery, state: FSMContext)
     await state.update_data(master_id=master_id)
     await state.set_state(MasterEditStates.waiting_for_name)
     await safe_answer_callback(callback)
-    await safe_edit_text(callback.message, "????? ????? ??? ???????.", reply_markup=cancel_creation_keyboard("masters"))
+    await safe_edit_text(callback.message, "\u0412\u0432\u0435\u0434\u0438 \u043d\u043e\u0432\u043e\u0435 \u0438\u043c\u044f \u043c\u0430\u0441\u0442\u0435\u0440\u0430.", reply_markup=cancel_creation_keyboard("masters"))
 
 
 @router.message(MasterEditStates.waiting_for_name)
@@ -309,15 +309,15 @@ async def admin_master_delete_callback(callback: CallbackQuery) -> None:
     async with SessionLocal() as session:
         deleted, reason = await delete_master(session, master_id)
     if deleted:
-        await safe_answer_callback(callback, "?????? ??????")
+        await safe_answer_callback(callback, "\u041c\u0430\u0441\u0442\u0435\u0440 \u0443\u0434\u0430\u043b\u0435\u043d")
         await render_masters(callback)
         return
     if reason == "last_master":
-        await safe_answer_callback(callback, "?????? ??????? ?????????? ???????", show_alert=True)
+        await safe_answer_callback(callback, "\u041d\u0435\u043b\u044c\u0437\u044f \u0443\u0434\u0430\u043b\u0438\u0442\u044c \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0435\u0433\u043e \u043c\u0430\u0441\u0442\u0435\u0440\u0430", show_alert=True)
     elif reason == "has_related":
-        await safe_answer_callback(callback, "?????? ??????? ??????? ? ????????, ???????? ??? ????????", show_alert=True)
+        await safe_answer_callback(callback, "\u041d\u0435\u043b\u044c\u0437\u044f \u0443\u0434\u0430\u043b\u0438\u0442\u044c \u043c\u0430\u0441\u0442\u0435\u0440\u0430 \u0441 \u0443\u0441\u043b\u0443\u0433\u0430\u043c\u0438, \u0437\u0430\u043f\u0438\u0441\u044f\u043c\u0438 \u0438\u043b\u0438 \u0433\u0440\u0430\u0444\u0438\u043a\u043e\u043c", show_alert=True)
     else:
-        await safe_answer_callback(callback, "?????? ?? ??????", show_alert=True)
+        await safe_answer_callback(callback, "\u041c\u0430\u0441\u0442\u0435\u0440 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d", show_alert=True)
 
 
 @router.callback_query(F.data == "admin:services")
